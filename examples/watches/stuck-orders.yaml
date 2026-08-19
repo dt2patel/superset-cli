@@ -1,0 +1,24 @@
+# Orders approved but still unfulfilled after 24h.
+# Narrow and indexed: filters on status and a timestamp, returns one number.
+name: stuck-orders
+description: Orders approved but unfulfilled for over 24h
+enabled: true
+source:
+  type: sql
+  database: acme_oms
+  schema: public
+  sql: |
+    SELECT COUNT(*) AS stuck
+    FROM order_header
+    WHERE status_id = 'ORDER_APPROVED'
+      AND created_stamp < NOW() - INTERVAL '24 hours'
+condition:
+  type: threshold
+  column: stuck
+  op: ">"
+  value: 50
+schedule:
+  every: 30m
+notify:
+  targets: [local, gchat]
+  renotify_after: 4h

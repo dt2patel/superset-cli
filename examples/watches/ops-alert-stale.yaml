@@ -1,0 +1,19 @@
+# An active alert that missed its own scheduled run is silently protecting
+# nothing - worse than one that visibly errors. Staleness is judged against each
+# alert's cron in its own timezone, so weekly and monthly reports are not
+# flagged for legitimately sitting idle.
+name: superset-alert-stale
+description: Active alerts that missed their scheduled run
+enabled: true
+source:
+  type: ops
+  signal: alert_stale
+condition:
+  type: threshold
+  op: ">"
+  value: 2
+schedule:
+  every: 1h
+notify:
+  targets: [local]
+  renotify_after: 12h

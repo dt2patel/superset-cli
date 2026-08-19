@@ -1,0 +1,19 @@
+# Superset's own Alerts & Reports falling into Error state.
+# Reads Superset metadata only - no client database is touched.
+# Baseline when written: 40 in error. The threshold catches deterioration;
+# use `tathya ops alerts` to work through the existing backlog.
+name: superset-alert-errors
+description: Client-facing Superset alerts/reports failing to run
+enabled: true
+source:
+  type: ops
+  signal: alert_errors
+condition:
+  type: threshold
+  op: ">"
+  value: 42
+schedule:
+  every: 1h
+notify:
+  targets: [local]
+  renotify_after: 12h

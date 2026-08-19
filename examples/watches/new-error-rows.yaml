@@ -1,0 +1,20 @@
+# Any row at all is a problem: rowcount with a > 0 threshold.
+name: integration-errors
+description: New integration error rows in the last 15 minutes
+enabled: false
+source:
+  type: sql
+  database: acme_oms
+  sql: |
+    SELECT error_id, error_message, created_stamp
+    FROM integration_error_log
+    WHERE created_stamp > NOW() - INTERVAL '15 minutes'
+    ORDER BY created_stamp DESC
+condition:
+  type: rowcount
+  op: ">"
+  value: 0
+schedule:
+  every: 15m
+notify:
+  targets: [local, gchat]

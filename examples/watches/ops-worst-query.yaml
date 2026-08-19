@@ -1,0 +1,18 @@
+# The single worst query duration in the window. A query over two minutes on a
+# production OMS replica is worth knowing about immediately.
+name: worst-query-duration
+description: Slowest single query across all databases
+enabled: true
+source:
+  type: ops
+  signal: max_query_seconds
+  since: 1h
+condition:
+  type: threshold
+  op: ">"
+  value: 120
+schedule:
+  every: 15m
+notify:
+  targets: [local]
+  renotify_after: 4h

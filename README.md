@@ -1,0 +1,422 @@
+# tathya
+
+A safety-first CLI for [Apache Superset](https://superset.apache.org) — built so
+that **AI agents can query and manage a Superset instance without being able to
+harm the production databases behind it**, plus a monitoring layer that watches
+production by reading Superset's own records rather than querying it.
+
+Tested against **Superset 4.0.0**.
+
+```bash
+tathya digest                       # whole production picture, one command
+tathya sql run analytics "SELECT status, COUNT(*) FROM orders GROUP BY 1"
+tathya ops alerts                   # which of your alerts & reports are broken
+```
+
+## Why this exists
+
+Superset is often wired straight to **live production databases** rather than an
+isolated warehouse. That makes it a lovely BI tool and a dangerous thing to hand
+an autonomous agent: heavy hand-run queries have pushed production read-replicas
+to 100% CPU, and an agent that retries a failed query in a loop is a strictly
+worse version of that.
+
+Superset 5.0+ ships a native MCP server. On 4.x it does not exist, so this CLI
+fills the gap — and it adds guardrails an MCP server does not: a deny-by-default
+database allowlist, a read-only SQL guard, locally-enforced rate limits, and an
+audit log.
+
+---
+
+# Setup
+
+## 1. Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| macOS | Secrets are stored in the macOS Keychain via `security` |
+| Python 3.11+ | `tomllib` and `zoneinfo` are used from the stdlib |
+| [uv](https://docs.astral.sh/uv/) | `brew install uv` |
+| A Superset account using **`db` or `ldap`** auth | Superset's JWT login endpoint has no OAuth/SSO branch, so an SSO-only account cannot obtain a token |
+
+Check your auth type by looking at the Superset login page: a username/password
+form means `db` or `ldap` and you are fine; a "Sign in with Google" button alone
+means you need a `db`-provider service account instead.
+
+## 2. Install
+
+```bash
+git clone https://github.com/dt2patel/superset-cli.git
+cd superset-cli
+uv tool install --editable .
+```
+
+That puts `tathya` on your `PATH` (usually `~/.local/bin/tathya`). Verify:
+
+```bash
+tathya --version
+```
+
+## 3. Create the config
+
+```bash
+tathya init
+```
+
+This writes `~/.config/tathya/config.toml` (mode 0600) and
+`~/.config/tathya/watches/`. Open the config and set three things:
+
+```toml
+[instance]
+base_url = "https://superset.example.com"   # origin only, no path
+username = "your.username"
+provider = "ldap"                            # or "db"
+```
+
+**`base_url` is the origin, not a page.** Use `https://superset.example.com`,
+not `https://superset.example.com/superset/welcome/` — the CLI appends
+`/api/v1/...` itself.
+
+## 4. Store the password
+
+```bash
+tathya auth login
+```
+
+You are prompted on the terminal. The value goes straight to the macOS Keychain
+via `security` with `-w` last, so it never appears in a config file, in `git`, or
+in `argv` where `ps` could read it. Nothing else ever needs to see it.
+
+If login fails, **do not re-run it in a loop** — corporate LDAP commonly locks an
+account after a handful of failures, and the usual cause is username *format*
+(`you` vs `you@example.com`), not a wrong password.
+
+## 5. Allowlist the databases agents may query
+
+Nothing is queryable until it is listed. See what exists:
+
+```bash
+tathya db list
+```
+
+Then add an entry per database, keeping the list as small as possible:
+
+```toml
+[[databases]]
+name = "Acme OMS"        # exactly as shown by `tathya db list`
+id = 42                  # optional; resolved by name if omitted
+dialect = "mysql"        # match the Superset backend - see below
+default_schema = "public"
+max_rows = 200           # tighter than the global cap
+note = "Production OMS replica - keep queries narrow and indexed"
+```
+
+**Set `dialect`.** Without it, valid dialect-specific SQL is refused as
+unparseable — MySQL backtick identifiers being the common case. Map from the
+`backend` column of `tathya db list`:
+
+| Superset backend | `dialect` |
+|---|---|
+| `mysql` | `mysql` |
+| `postgresql` | `postgres` |
+| `mssql` | `tsql` |
+| `sqlite` | `sqlite` |
+
+Prefer an **OLAP or read-replica** database over a transactional one where both
+exist. That single choice does more for safety than any cap in this tool.
+
+## 6. Verify
+
+```bash
+tathya health
+```
+
+Expect `auth: ok`, a user line, asset counts, and your allowlist. Then confirm
+the guard is live — this should fail with **exit 5**, before touching the database:
+
+```bash
+tathya sql run "Acme OMS" "DROP TABLE orders"
+```
+
+## 7. Optional — reporting to Google Chat
+
+```bash
+tathya notify set-webhook     # paste a space webhook; stored in the Keychain
+tathya notify test            # preview only
+tathya notify test --confirm  # actually post
+```
+
+Anything that posts externally requires `--confirm`; previewing is the default.
+
+## 8. Optional — scheduled monitoring
+
+```bash
+cp launchd/co.tathya.digest.plist ~/Library/LaunchAgents/
+# edit the paths inside first
+launchctl load ~/Library/LaunchAgents/co.tathya.digest.plist
+```
+
+launchd does not read your shell profile, so config and state paths are set in
+the plist. These are **LaunchAgents**, not daemons, because reading the
+credential needs an unlocked login Keychain.
+
+---
+
+# The safety model
+
+| Control | Behaviour |
+|---|---|
+| **Database allowlist** | Deny by default. A database Superset exposes is unusable until added to `[[databases]]`. Applies to ad-hoc SQL *and* saved-chart data. |
+| **Read-only SQL guard** | Single statement; `SELECT`/`WITH` roots only; no write or DDL node anywhere in the parse tree (including data-modifying CTEs); no `SELECT … INTO`; no `FOR UPDATE`/`FOR SHARE`; no session-stalling functions; no parameter placeholders. Anything unparseable is **refused**, not forwarded. |
+| **Row caps** | A `LIMIT` is injected when absent and clamped when too large. `--max-rows` may only tighten it. |
+| **Rate limits** | Per-minute token bucket, daily ceiling, and concurrency cap — all enforced **locally, before the request is sent**. Exhaustion is a terminal error, not a wait, so an agent cannot turn a rate limit into a slow flood. |
+| **Blackout windows** | Optional clock windows where ad-hoc SQL is refused, e.g. peak hours. |
+| **No retry on writes or queries** | Idempotent `GET`s retry with backoff. `POST /sqllab/execute/` never does — a retry runs the query on the database again. |
+| **Two-switch write gate** | Writes are a dry run unless `--confirm` **and** `TATHYA_ALLOW_WRITE=1`. Deletes additionally need `allow_delete = true`. |
+| **Secret redaction** | Two layers: exact/suffix key-name matching, plus value scanning for DSN passwords and JWTs regardless of key name. |
+| **Audit log** | Every call appends one JSON line to `~/.local/state/tathya/audit.jsonl` — actor, guarded SQL, rows, duration, outcome — including refusals. |
+
+Agents should set `TATHYA_ACTOR` so their load is attributable:
+
+```bash
+TATHYA_ACTOR=agent:inventory-review tathya sql run ...
+```
+
+## Exit codes
+
+Agents branch on these instead of parsing text.
+
+| Code | Meaning | Retry? |
+|---|---|---|
+| 0 | success | — |
+| 2 | usage error | no |
+| 3 | config error, e.g. database not allowlisted | no |
+| 4 | auth failure | no — re-run `tathya auth login` |
+| 5 | **SQL guard refused the statement** | **never** — rewrite the query |
+| 6 | **rate limited / blackout** | **never in a loop** — back off |
+| 7 | upstream Superset error | maybe, with backoff |
+| 8 | write blocked by the gate | no |
+| 9 | a watch or digest needs attention (not an error) | — |
+| 10 | timeout — the query may still be running | no |
+
+---
+
+# Usage
+
+Output is JSON when stdout is not a terminal and human-readable when it is, so
+one command serves both you and an agent. Force with `--json` / `--text`.
+
+## Explore
+
+```bash
+tathya db list                       # which databases agents may query
+tathya dataset list --search order
+tathya dataset get 7                 # columns, types, metrics
+tathya dashboard list
+tathya dashboard charts my-dashboard
+tathya chart data 10                 # run a saved chart's query
+```
+
+## Ad-hoc answers
+
+```bash
+tathya sql run "Acme OMS" "SELECT status, COUNT(*) FROM orders GROUP BY 1"
+tathya sql run "Acme OMS" --file query.sql --max-rows 200
+tathya sql run "Acme OMS" "SELECT * FROM orders" --explain-only   # guard decision, no DB contact
+tathya sql estimate "Acme OMS" --file query.sql                   # engine cost, where supported
+tathya sql run "Acme OMS" "SELECT 1" --format csv
+```
+
+`--explain-only` is the cheapest way to check an unfamiliar query: it shows the
+guard's rewritten SQL and its warnings without contacting the database.
+
+## Manage dashboards and charts
+
+Dry run unless **both** switches are set.
+
+```bash
+tathya chart create --name "Stuck Orders" --dataset-id 7 --viz-type big_number_total
+TATHYA_ALLOW_WRITE=1 tathya chart create ... --confirm
+TATHYA_ALLOW_WRITE=1 tathya dashboard add-chart 2 11 --confirm
+tathya export dashboard 1 --out dashboard.zip
+```
+
+## Accountability
+
+```bash
+tathya limits                            # remaining query budget, blackout state
+tathya audit tail --limit 50
+tathya audit tail --outcome guard_rejected
+```
+
+---
+
+# Monitoring production without querying it
+
+Superset already records every SQL Lab query it has run and the state of every
+configured Alert & Report. Reading *that* gives real visibility for the cost of a
+couple of metadata calls, instead of adding load to the databases this tool
+exists to protect.
+
+So `ops` and `digest` **consume no query budget** — they cannot put load on a
+client database — and they deliberately observe **all** databases, not just
+allowlisted ones. The allowlist governs what an agent may *cause*; these only
+read the record of what already happened.
+
+```bash
+tathya digest                            # exits 9 when something needs attention
+tathya digest --since 24h --target gchat --confirm
+
+tathya ops load --since 6h                # volume + avg/p95/max duration per database
+tathya ops slow --since 24h --min-seconds 30
+tathya ops failures --since 6h
+tathya ops queries --database "Acme OMS" --status failed
+tathya ops alerts                         # health of Superset's own alerts & reports
+```
+
+Digest thresholds live under `[digest]` in the config.
+
+## Alert staleness is judged against each schedule
+
+An active alert that silently stopped evaluating is worse than one that visibly
+errors. But staleness cannot be a flat age: a monthly report legitimately sits
+idle for weeks and a Friday-only alert for days.
+
+`ops alerts` computes each alert's *previous expected run* from its own crontab,
+in its own timezone, and flags it only if it has not evaluated since. On a real
+instance this took the "stale" count from **70 false positives to 2 real ones**.
+A monitor you learn to ignore is worse than no monitor.
+
+---
+
+# Watches
+
+A watch is a condition evaluated on a schedule that reports on **status
+transitions** — so a condition that stays true all day produces one message, not
+forty-eight. `renotify_after` opts back into periodic reminders.
+
+Definitions live in `~/.config/tathya/watches/*.yaml`. Examples are in
+[`examples/watches/`](examples/watches).
+
+```bash
+tathya watch list
+tathya watch run --all --due-only        # what the scheduler runs
+tathya watch run my-watch --dry-run      # preview the message, send nothing
+tathya watch state
+```
+
+## Ops-backed watches (preferred)
+
+These monitor production without querying it, so they can poll every 15 minutes.
+
+```yaml
+name: slow-queries
+description: Queries running longer than 30s anywhere
+source:
+  type: ops
+  signal: slow_queries        # failed_queries | slow_queries | max_query_seconds
+  since: 6h                   # query_volume | alert_errors | alert_stale
+  threshold_seconds: 30
+condition:
+  type: threshold
+  op: ">"
+  value: 5
+schedule:
+  every: 30m
+notify:
+  targets: [local]
+  renotify_after: 6h
+```
+
+## SQL-backed watches
+
+For business conditions only a query can answer. Keep these narrow and
+infrequent — they run against a real database.
+
+```yaml
+name: stuck-orders
+source:
+  type: sql              # or: type: chart, chart_id: 10
+  database: "Acme OMS"
+  sql: |
+    SELECT COUNT(*) AS stuck
+    FROM orders
+    WHERE status = 'APPROVED'
+      AND created_at < NOW() - INTERVAL '24 hours'
+condition:
+  type: threshold        # threshold | rowcount | change | delta_pct
+  column: stuck
+  op: ">"
+  value: 50
+schedule:
+  every: 30m
+notify:
+  targets: [local, gchat]
+```
+
+---
+
+# Using this with AI agents
+
+[`skills/tathya-cli/SKILL.md`](skills/tathya-cli/SKILL.md) is a Claude Code skill
+that teaches an agent the safe command surface, the exit-code contract, and the
+rules that matter — chiefly *never retry on exit 5 or 6*. Install it by linking
+into your skills directory:
+
+```bash
+ln -s "$PWD/skills/tathya-cli" ~/.claude/skills/tathya-cli
+```
+
+---
+
+# Development
+
+```bash
+uv sync
+uv run pytest -q
+```
+
+[`tests/mock_superset.py`](tests/mock_superset.py) is a mock Superset 4.0 API
+that **enforces** the contract rather than rubber-stamping it: it requires the
+CSRF header and `Referer` on mutating calls, rejects any `sqllab/execute` payload
+without a `LIMIT` or containing write keywords, reproduces Superset's
+11-character `client_id` limit, and mirrors the real payload shapes (the chart
+*detail* endpoint omits `datasource_id`, for instance). Run it standalone to
+exercise the CLI without touching a real instance:
+
+```bash
+uv run python tests/mock_superset.py 8099
+```
+
+**The installed CLI has its own environment.** `uv tool install --editable`
+tracks the working tree for *code* but not for dependencies: after `uv add`, the
+tool keeps its old environment until reinstalled. A new dependency then works
+under `uv run` and fails under `tathya` — silently, if the import sits inside a
+`try/except`. Reinstall after changing dependencies:
+
+```bash
+uv tool install --editable . --force
+```
+
+---
+
+# Known limits
+
+- **`chart data` needs a saved query context.** Superset's
+  `/api/v1/chart/{id}/data/` returns `400 "Chart has no query context saved"` for
+  charts created by older versions or via the API. Re-saving the chart once in
+  the UI populates it; otherwise use `tathya sql run`.
+- **Asset exports leak topology, not passwords.** Export YAML contains
+  `sqlalchemy_uri` with the password masked by Superset, but username, host,
+  port, and database name are in the clear. Review before committing.
+- **`dashboard add-chart` appends a full-width row.** Finer layout needs
+  `--position-json-file` or the Superset UI.
+- **Cost estimation is engine-dependent.** `sql estimate` reports unsupported
+  rather than guessing where the engine cannot cost a query.
+- **`/api/v1/me/` is absent on some deployments.** Identity falls back to the JWT
+  subject claim; health does not depend on that endpoint.
+- **macOS only**, because secret storage uses the macOS Keychain.
+
+# License
+
+[Apache License 2.0](LICENSE) — matching Apache Superset itself.

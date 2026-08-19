@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Daily production digest at 09:00.
+
+  Reads Superset's own metadata only, so it adds no load to any client database
+  and is safe to run on a schedule. Exits 9 when something needs attention;
+  --no-alert-exit keeps launchd from logging that as a job failure.
+
+  Add `--target gchat --confirm` once a webhook is stored via
+  `tathya notify set-webhook` to have it post to a Chat space.
+
+  Install:
+    cp launchd/co.tathya.digest.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/co.tathya.digest.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.tathya.digest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR-USERNAME/.local/bin/tathya</string>
+        <string>--text</string>
+        <string>digest</string>
+        <string>--since</string>
+        <string>24h</string>
+        <string>--target</string>
+        <string>local</string>
+        <string>--confirm</string>
+        <string>--no-alert-exit</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TATHYA_CONFIG</key>
+        <string>/Users/YOUR-USERNAME/.config/tathya/config.toml</string>
+        <key>TATHYA_STATE_DIR</key>
+        <string>/Users/YOUR-USERNAME/.local/state/tathya</string>
+        <key>TATHYA_ACTOR</key>
+        <string>launchd:digest</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR-USERNAME/.local/state/tathya/digest.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR-USERNAME/.local/state/tathya/digest.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Scheduled watch runs.
+
+  Edit the three paths below before loading:
+    - ProgramArguments[0]   absolute path to the tathya binary (`which tathya`)
+    - TATHYA_CONFIG         absolute path to config.toml
+    - TATHYA_STATE_DIR      absolute path to the state directory
+
+  launchd does not read your shell profile, so environment must be set here.
+  This is a LaunchAgent, not a daemon, because reading the credential needs an
+  unlocked login Keychain in your user session.
+
+  Install:
+    cp launchd/co.tathya.watch.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/co.tathya.watch.plist
+  Remove:
+    launchctl unload ~/Library/LaunchAgents/co.tathya.watch.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.tathya.watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR-USERNAME/.local/bin/tathya</string>
+        <string>--json</string>
+        <string>watch</string>
+        <string>run</string>
+        <string>--all</string>
+        <string>--due-only</string>
+        <!-- Exit 9 means "a watch is alerting"; without this launchd logs it as
+             a failure every time something is legitimately wrong. -->
+        <string>--no-alert-exit</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TATHYA_CONFIG</key>
+        <string>/Users/YOUR-USERNAME/.config/tathya/config.toml</string>
+        <key>TATHYA_STATE_DIR</key>
+        <string>/Users/YOUR-USERNAME/.local/state/tathya</string>
+        <key>TATHYA_ACTOR</key>
+        <string>launchd:watch</string>
+    </dict>
+
+    <!-- Every 5 minutes; each watch's own `every` decides if it actually runs. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR-USERNAME/.local/state/tathya/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR-USERNAME/.local/state/tathya/launchd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

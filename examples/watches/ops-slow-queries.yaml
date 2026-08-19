@@ -1,0 +1,20 @@
+# Long-running queries against any database Tathya is connected to. This is the
+# early-warning signal for a read-replica CPU incident class, and
+# it costs nothing because it reads query history rather than running queries.
+name: slow-queries
+description: Queries running longer than 30s anywhere on Tathya
+enabled: true
+source:
+  type: ops
+  signal: slow_queries
+  since: 6h
+  threshold_seconds: 30
+condition:
+  type: threshold
+  op: ">"
+  value: 5
+schedule:
+  every: 30m
+notify:
+  targets: [local]
+  renotify_after: 6h

@@ -1,0 +1,18 @@
+# Reuses an existing Superset chart instead of new SQL, so the query is one
+# Tathya already runs. Cheapest option when a chart already shows the number.
+name: fulfillment-rate-drop
+description: Alert when the fulfillment rate moves more than 15% versus the last check
+enabled: true
+source:
+  type: chart
+  chart_id: 10
+condition:
+  type: delta_pct
+  column: fulfillment_rate
+  op: ">"
+  value: 15
+schedule:
+  every: 1h
+notify:
+  targets: [local]
+link: https://REPLACE-ME/superset/dashboard/fulfil-ops/
