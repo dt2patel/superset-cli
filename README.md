@@ -57,88 +57,67 @@ That puts `tathya` on your `PATH` (usually `~/.local/bin/tathya`). Verify:
 tathya --version
 ```
 
-## 3. Create the config
+## 3. Run the setup wizard
 
 ```bash
-tathya init
+tathya setup
 ```
 
-This writes `~/.config/tathya/config.toml` (mode 0600) and
-`~/.config/tathya/watches/`. Open the config and set three things:
+Paste a base URL and credentials; everything else is discovered from the
+instance. Seven steps, each verified before the next:
 
-```toml
-[instance]
-base_url = "https://superset.example.com"   # origin only, no path
-username = "your.username"
-provider = "ldap"                            # or "db"
-```
+1. **Environment** — macOS, Python, Keychain availability
+2. **Instance** — accepts any URL and reduces it to the origin (paste the page
+   you were looking at and it strips the path), then proves `/health` and
+   `/api/v1/` respond *before* asking for anything secret
+3. **Authentication** — inspects the login page and tells you whether db/ldap
+   will work or the account is SSO-only (which Superset's JWT login cannot use)
+4. **Password** — prompted hidden, straight into the Keychain
+5. **Verify** — one login attempt, with an explicit warning not to retry in a
+   loop if it fails (LDAP lockout; the usual cause is username *format*)
+6. **Allowlist** — lists every database, filter by name, pick by number. The
+   **`dialect` is derived from Superset's own backend field** and the numeric
+   `id` is pinned automatically — the two things a newcomer cannot know and
+   which otherwise silently break queries
+7. **Optional** — install starter monitoring watches (they read Superset
+   metadata, so they cost no query budget) and store a Google Chat webhook
 
-**`base_url` is the origin, not a page.** Use `https://superset.example.com`,
-not `https://superset.example.com/superset/welcome/` — the CLI appends
-`/api/v1/...` itself.
-
-## 4. Store the password
+Then confirm:
 
 ```bash
-tathya auth login
+tathya health                                   # expect auth: ok
+tathya sql run "<your db>" "DROP TABLE x"       # expect exit 5, refused
 ```
 
-You are prompted on the terminal. The value goes straight to the macOS Keychain
-via `security` with `-w` last, so it never appears in a config file, in `git`, or
-in `argv` where `ps` could read it. Nothing else ever needs to see it.
+<details>
+<summary>Configuring by hand instead</summary>
 
-If login fails, **do not re-run it in a loop** — corporate LDAP commonly locks an
-account after a handful of failures, and the usual cause is username *format*
-(`you` vs `you@example.com`), not a wrong password.
+`tathya init` writes a starter `~/.config/tathya/config.toml` to edit. Three
+things matter and are easy to get wrong:
 
-## 5. Allowlist the databases agents may query
-
-Nothing is queryable until it is listed. See what exists:
-
-```bash
-tathya db list
-```
-
-Then add an entry per database, keeping the list as small as possible:
+- **`base_url` is the origin**, not a page — `https://superset.example.com`, not
+  `https://superset.example.com/superset/welcome/`. The CLI appends `/api/v1`.
+- **`provider` must be `db` or `ldap`.** Superset's JWT login has no OAuth
+  branch, so an SSO-only account cannot obtain a token at all.
+- **Set `dialect` per database**, mapped from the `backend` column of
+  `tathya db list`: `mysql`→`mysql`, `postgresql`→`postgres`, `mssql`→`tsql`,
+  `sqlite`→`sqlite`. Without it, valid dialect-specific SQL (MySQL backtick
+  identifiers being the common case) is refused as unparseable.
 
 ```toml
 [[databases]]
 name = "Acme OMS"        # exactly as shown by `tathya db list`
-id = 42                  # optional; resolved by name if omitted
-dialect = "mysql"        # match the Superset backend - see below
-default_schema = "public"
-max_rows = 200           # tighter than the global cap
-note = "Production OMS replica - keep queries narrow and indexed"
+id = 42
+dialect = "mysql"
+max_rows = 200
 ```
 
-**Set `dialect`.** Without it, valid dialect-specific SQL is refused as
-unparseable — MySQL backtick identifiers being the common case. Map from the
-`backend` column of `tathya db list`:
-
-| Superset backend | `dialect` |
-|---|---|
-| `mysql` | `mysql` |
-| `postgresql` | `postgres` |
-| `mssql` | `tsql` |
-| `sqlite` | `sqlite` |
-
-Prefer an **OLAP or read-replica** database over a transactional one where both
+Prefer an OLAP or read-replica database over a transactional one where both
 exist. That single choice does more for safety than any cap in this tool.
 
-## 6. Verify
+</details>
 
-```bash
-tathya health
-```
-
-Expect `auth: ok`, a user line, asset counts, and your allowlist. Then confirm
-the guard is live — this should fail with **exit 5**, before touching the database:
-
-```bash
-tathya sql run "Acme OMS" "DROP TABLE orders"
-```
-
-## 7. Optional — reporting to Google Chat
+## 4. Reporting to Google Chat (optional)
 
 ```bash
 tathya notify set-webhook     # paste a space webhook; stored in the Keychain
@@ -148,7 +127,7 @@ tathya notify test --confirm  # actually post
 
 Anything that posts externally requires `--confirm`; previewing is the default.
 
-## 8. Optional — scheduled monitoring
+## 5. Scheduled monitoring (optional)
 
 ```bash
 cp launchd/co.tathya.digest.plist ~/Library/LaunchAgents/

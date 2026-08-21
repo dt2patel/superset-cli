@@ -20,6 +20,16 @@ Heavy queries through this deployment have driven a production replica to 100%
 CPU and triggered infrastructure alarms. Treat every query as landing on live client
 infrastructure.
 
+## Cold install
+
+If `tathya health` reports a config error or a missing password, the user has not
+set up yet. Tell them to run **`tathya setup`** — an interactive wizard that
+takes a base URL and credentials and derives everything else from the instance
+(URL normalisation, provider guidance, per-database `dialect`, pinned ids,
+starter watches). It is deliberately interactive and cannot be scripted, because
+the password prompt must reach a human. Do not attempt to hand-write the config
+for them unless they ask.
+
 ## Always
 
 - Set `TATHYA_ACTOR` to identify yourself, e.g.

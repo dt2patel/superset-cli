@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from tathya import config as config_mod
 from tathya.context import Context
-from tathya.errors import EXIT_OK, ConfigError, UsageError
+from tathya.errors import EXIT_AUTH, EXIT_OK, ConfigError, UsageError
 from tathya.keychain import (
     GCHAT_WEBHOOK_ACCOUNT,
     account_for_password,
@@ -38,18 +38,25 @@ def cmd_init(ctx: Context) -> int:
     path.chmod(0o600)
     watches = config_mod.watches_dir()
     watches.mkdir(parents=True, exist_ok=True)
+    def human(data, line):
+        line(f"Config written to {data['config']}")
+        line("")
+        line("Next:")
+        for step in data["next_steps"]:
+            line(f"  - {step}")
+
     return ctx.emitter.ok(
         "init",
         {
             "config": str(path),
             "watches_dir": str(watches),
             "next_steps": [
-                f"Edit {path}: set instance.base_url and instance.username.",
-                "Add a [[databases]] entry for each database agents may query.",
-                "Run `tathya auth login` to store the password in the Keychain.",
-                "Run `tathya health` to confirm connectivity.",
+                "Run `tathya setup` to fill this in interactively (recommended).",
+                f"Or edit {path} by hand: instance.base_url, instance.username, "
+                "and a [[databases]] entry per database agents may query.",
             ],
         },
+        human=human,
     )
 
 
@@ -143,6 +150,7 @@ def cmd_health(ctx: Context) -> int:
     report["identity"] = identity
 
     counts: dict[str, object] = {}
+    count_errors: set[str] = set()
     for label, path in (
         ("dashboards", "/api/v1/dashboard/"),
         ("charts", "/api/v1/chart/"),
@@ -153,8 +161,12 @@ def cmd_health(ctx: Context) -> int:
             payload = ctx.client.get(path, params={"q": rison_query(page=0, page_size=1)})
             counts[label] = payload.get("count")
         except Exception as exc:
-            counts[label] = f"error: {getattr(exc, 'message', exc)}"
+            # Collapse identical failures - four copies of one auth error is noise.
+            counts[label] = "unavailable"
+            count_errors.add(str(getattr(exc, "message", exc)))
     report["visible_counts"] = counts
+    if count_errors:
+        report["count_errors"] = sorted(count_errors)
     # Authentication is proven by a successful authenticated call, not by /me/.
     report["authenticated"] = any(isinstance(v, int) for v in counts.values())
     report["allowlisted_databases"] = [rule.name for rule in ctx.config.databases]
@@ -170,8 +182,13 @@ def cmd_health(ctx: Context) -> int:
         line("counts     : " + ", ".join(f"{k}={v}" for k, v in data["visible_counts"].items()))
         line(f"allowlisted: {', '.join(data['allowlisted_databases']) or '(none - sql run will refuse)'}")
         line(f"writes     : {'enabled' if data['writes_enabled'] else 'disabled'}")
+        for problem in data.get("count_errors") or []:
+            line(f"problem    : {problem}")
 
-    return ctx.emitter.ok("health", report, human=human)
+    # A health check that cannot authenticate must not report success: an agent or
+    # a monitoring script branches on this exit code.
+    exit_code = EXIT_OK if report["authenticated"] else EXIT_AUTH
+    return ctx.emitter.ok("health", report, human=human, exit_code=exit_code)
 
 
 def cmd_limits(ctx: Context) -> int:

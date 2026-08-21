@@ -20,6 +20,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tathya"]
 
+# The setup wizard offers to install starter watches; without this they exist
+# only in a source checkout and the step silently does nothing when installed
+# from a wheel.
+[tool.hatch.build.targets.wheel.force-include]
+"examples/watches" = "tathya/_examples/watches"
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 

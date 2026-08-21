@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +39,36 @@ def watches_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return config_path().parent / "watches"
+
+
+#: Values shipped in the starter template. A config still carrying them has not
+#: been filled in, and every downstream error would be a confusing symptom of
+#: that rather than the cause.
+PLACEHOLDER_USERNAMES = frozenset({"REPLACE-ME", "replace-me", ""})
+PLACEHOLDER_BASE_URLS = frozenset({"https://superset.example.com", "https://REPLACE-ME.example.com"})
+
+
+def normalize_base_url(raw: str) -> tuple[str, str | None]:
+    """Reduce a pasted URL to its origin.
+
+    People paste the page they were looking at - ``https://superset.example.com/
+    superset/welcome/`` - and every ``/api/v1/...`` call then resolves under that
+    path and 404s. Returns (origin, discarded) so the caller can say what it
+    dropped instead of silently changing the input.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "", None
+    if not text.startswith(("http://", "https://")):
+        text = "https://" + text
+    parts = urlsplit(text)
+    if not parts.netloc:
+        return text.rstrip("/"), None
+    origin = f"{parts.scheme}://{parts.netloc}"
+    discarded = "".join(
+        part for part in (parts.path.rstrip("/"), f"?{parts.query}" if parts.query else "") if part
+    )
+    return origin, (discarded or None)
 
 
 @dataclass(frozen=True)
@@ -119,6 +150,8 @@ class DigestConfig:
 @dataclass(frozen=True)
 class Config:
     instance: InstanceConfig
+    #: Non-fatal problems found while loading, surfaced by health and setup.
+    warnings: tuple[str, ...] = ()
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     reporting: ReportingConfig = field(default_factory=ReportingConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
@@ -172,9 +205,22 @@ def load(path: Path | None = None) -> Config:
         raise ConfigError(f"Config at {resolved} is not valid TOML: {exc}") from exc
 
     inst_raw = raw.get("instance") or {}
-    base_url = str(_require(inst_raw, "base_url", "instance")).rstrip("/")
-    if not base_url.startswith(("http://", "https://")):
-        raise ConfigError("instance.base_url must start with http:// or https://")
+    warnings: list[str] = []
+    raw_base = str(_require(inst_raw, "base_url", "instance"))
+    if raw_base.strip() in PLACEHOLDER_BASE_URLS:
+        raise ConfigError(
+            "instance.base_url is still the starter placeholder.",
+            fix="Run `tathya setup` to configure this instance interactively.",
+            config=str(resolved),
+        )
+    base_url, discarded = normalize_base_url(raw_base)
+    if not base_url:
+        raise ConfigError("instance.base_url is empty")
+    if discarded:
+        warnings.append(
+            f"instance.base_url contained the path {discarded!r}, which was ignored - "
+            f"using the origin {base_url}. Set base_url to the origin only."
+        )
     provider = str(inst_raw.get("provider", "db")).lower()
     # Flask-AppBuilder's JWT login implements only these two branches; an OAuth/SSO
     # account cannot obtain a token from /api/v1/security/login at all.
@@ -183,9 +229,16 @@ def load(path: Path | None = None) -> Config:
             f"instance.provider must be 'db' or 'ldap', not {provider!r}.",
             note="Superset's API login has no OAuth/SSO branch.",
         )
+    username = str(_require(inst_raw, "username", "instance"))
+    if username.strip() in PLACEHOLDER_USERNAMES:
+        raise ConfigError(
+            "instance.username is still the starter placeholder.",
+            fix="Run `tathya setup` to configure this instance interactively.",
+            config=str(resolved),
+        )
     instance = InstanceConfig(
         base_url=base_url,
-        username=str(_require(inst_raw, "username", "instance")),
+        username=username,
         provider=provider,
         verify_tls=bool(inst_raw.get("verify_tls", True)),
         timeout_seconds=float(inst_raw.get("timeout_seconds", 60.0)),
@@ -255,6 +308,7 @@ def load(path: Path | None = None) -> Config:
         )
 
     return Config(
+        warnings=tuple(warnings),
         instance=instance,
         safety=safety,
         reporting=reporting,

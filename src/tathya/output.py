@@ -19,6 +19,10 @@ HumanRenderer = Callable[[Any, Callable[[str], None]], None]
 class Emitter:
     def __init__(self, mode: str = "auto", stream: Any = None) -> None:
         self.stream = stream if stream is not None else sys.stdout
+        #: Warnings that apply to every command in this invocation (e.g. config
+        #: problems). Set once, surfaced everywhere - wiring them command by
+        #: command means most commands silently swallow them.
+        self.ambient_warnings: list[str] = []
         if mode == "json":
             self.as_json = True
         elif mode == "text":
@@ -39,10 +43,11 @@ class Emitter:
         **extra: Any,
     ) -> int:
         payload = redact(data)
+        all_warnings = [*self.ambient_warnings, *warnings]
         if self.as_json:
             envelope = {"ok": True, "command": command, "data": payload}
-            if warnings:
-                envelope["warnings"] = list(warnings)
+            if all_warnings:
+                envelope["warnings"] = list(all_warnings)
             envelope.update({k: redact(v) for k, v in extra.items()})
             self.line(json.dumps(envelope, indent=2, default=str))
         else:
@@ -50,7 +55,7 @@ class Emitter:
                 human(payload, self.line)
             elif payload is not None:
                 self.line(json.dumps(payload, indent=2, default=str))
-            for warning in warnings:
+            for warning in all_warnings:
                 print(f"warning: {warning}", file=sys.stderr)
         return exit_code
 

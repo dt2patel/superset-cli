@@ -11,7 +11,7 @@ import os
 import sys
 
 from tathya import __version__
-from tathya.commands import digestcmd, meta, opscmd, read, sqlcmd, watchcmd, writecmd
+from tathya.commands import digestcmd, meta, opscmd, read, setup, sqlcmd, watchcmd, writecmd
 from tathya.config import load as load_config
 from tathya.context import Context
 from tathya.errors import EXIT_USAGE, TathyaError, UsageError
@@ -59,7 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     # ---------------------------------------------------------------- setup
-    p_init = sub.add_parser("init", help="write a starter config file")
+    p_setup = sub.add_parser(
+        "setup", help="interactive first-run configuration (recommended)"
+    )
+    p_setup.add_argument("--force", action="store_true",
+                         help="overwrite an existing config without asking")
+    p_setup.set_defaults(func=setup.cmd_setup, needs_config=False)
+
+    p_init = sub.add_parser("init", help="write a starter config file to edit by hand")
     p_init.add_argument("--force", action="store_true", help="overwrite an existing config")
     p_init.set_defaults(func=meta.cmd_init, needs_config=False)
 
@@ -322,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
             from pathlib import Path
 
             config = load_config(Path(args.config).expanduser() if args.config else None)
+            # Config-level problems apply to whatever command follows.
+            emitter.ambient_warnings.extend(config.warnings)
         ctx = Context(config=config, emitter=emitter, args=args)  # type: ignore[arg-type]
         return args.func(ctx)
     except TathyaError as err:
