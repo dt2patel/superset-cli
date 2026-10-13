@@ -8,13 +8,16 @@ exported variable can change Tathya on its own.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
 from typing import Any
 
+from tathya import guard
+from tathya.config import BACKEND_TO_DIALECT
 from tathya.context import Context
-from tathya.errors import UsageError
+from tathya.errors import ConfigError, UsageError
 from tathya.output import render_table
 
 GRID_ID = "GRID_ID"
@@ -39,15 +42,19 @@ def _apply(
     calls: list[dict],
     *,
     destructive: bool = False,
+    warnings: list[str] | None = None,
+    summary: dict | None = None,
 ) -> int:
     """Run (or preview) an ordered list of mutating API calls."""
+    extra = {"summary": summary} if summary else {}
     if not ctx.confirmed:
         return ctx.emitter.ok(
             action,
-            {"dry_run": True, "planned_calls": calls},
+            {"dry_run": True, **extra, "planned_calls": calls},
             warnings=[
+                *(warnings or []),
                 "Dry run - Tathya was not modified. Re-run with --confirm and "
-                "TATHYA_ALLOW_WRITE=1 to apply."
+                "TATHYA_ALLOW_WRITE=1 to apply.",
             ],
         )
     ctx.check_write(action, destructive=destructive)
@@ -90,8 +97,10 @@ def _apply(
         action,
         {
             "applied": True,
+            **extra,
             "calls": [{"method": c["method"], "path": c["path"]} for c in completed],
         },
+        warnings=list(warnings or []),
     )
 
 
@@ -139,6 +148,129 @@ def cmd_chart_delete(ctx: Context) -> int:
         ctx,
         "chart.delete",
         [{"method": "DELETE", "path": f"/api/v1/chart/{ctx.args.chart_id}"}],
+        destructive=True,
+    )
+
+
+# --------------------------------------------------------------------- datasets
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _read_sql_file(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.exists():
+        raise UsageError(f"--sql-file not found: {path}")
+    sql = path.read_text()
+    if not sql.strip():
+        raise UsageError(f"--sql-file is empty: {path}")
+    return sql
+
+
+def _dialect_for(ctx: Context, database: dict) -> str | None:
+    """sqlglot dialect for a dataset's database: the allowlist entry, else the backend."""
+    try:
+        rule = ctx.config.database_rule(database.get("database_name") or database.get("id"))
+        if rule.dialect:
+            return rule.dialect
+    except ConfigError:
+        pass
+    return BACKEND_TO_DIALECT.get((database.get("backend") or "").lower())
+
+
+def _guard_dataset_sql(ctx: Context, sql: str, dialect: str | None) -> list[str]:
+    """Refuse dataset SQL the read-only guard would refuse in `sql run`.
+
+    A virtual dataset's SQL runs against the client database every time a chart
+    on it renders, so it gets the same read-only check as an ad-hoc query. The
+    guard's LIMIT rewrite is not saved: charts apply their own row limits.
+    """
+    verdict = guard.analyze(
+        sql,
+        max_rows=ctx.config.safety.hard_max_rows,
+        dialect=dialect,
+        denied_functions=ctx.config.safety.denied_functions,
+    )
+    if not verdict.ok:
+        raise UsageError(
+            f"Dataset SQL refused by the SQL guard: {verdict.reason}",
+            rule=verdict.rule,
+            hint="Dataset SQL must be a single read-only SELECT/WITH statement.",
+        )
+    return list(verdict.warnings)
+
+
+def cmd_dataset_create(ctx: Context) -> int:
+    database = (ctx.client.get(f"/api/v1/database/{ctx.args.database_id}") or {}).get("result") or {}
+    sql = _read_sql_file(ctx.args.sql_file)
+    warnings = _guard_dataset_sql(ctx, sql, _dialect_for(ctx, database))
+    payload: dict[str, Any] = {
+        "database": ctx.args.database_id,
+        "table_name": ctx.args.name,
+        "sql": sql,
+    }
+    if ctx.args.schema:
+        payload["schema"] = ctx.args.schema
+    calls = [{"method": "POST", "path": "/api/v1/dataset/", "payload": payload}]
+    return _apply(ctx, "dataset.create", calls, warnings=warnings)
+
+
+def cmd_dataset_update(ctx: Context) -> int:
+    dataset_id = ctx.args.dataset_id
+    current = (ctx.client.get(f"/api/v1/dataset/{dataset_id}") or {}).get("result") or {}
+    current_sql = current.get("sql") or ""
+    payload: dict[str, Any] = {}
+    warnings: list[str] = []
+    summary: dict[str, Any] = {
+        "dataset_id": dataset_id,
+        "name": current.get("table_name"),
+        "database": (current.get("database") or {}).get("database_name"),
+    }
+
+    if ctx.args.sql_file:
+        if current.get("kind") == "physical" or not current_sql:
+            raise UsageError(
+                f"Dataset {dataset_id} is not a virtual (SQL) dataset; refusing to give it SQL.",
+            )
+        current_sha = _sha256(current_sql)
+        # Optimistic concurrency: the caller states which SQL it read, so a change
+        # someone made in the UI since then is never silently overwritten.
+        if ctx.args.expect_sql_sha256 and not current_sha.startswith(ctx.args.expect_sql_sha256.lower()):
+            raise UsageError(
+                f"Dataset {dataset_id} SQL changed since it was read; refusing to overwrite it.",
+                current_sql_sha256=current_sha,
+                expected=ctx.args.expect_sql_sha256,
+            )
+        sql = _read_sql_file(ctx.args.sql_file)
+        warnings += _guard_dataset_sql(ctx, sql, _dialect_for(ctx, current.get("database") or {}))
+        if sql == current_sql:
+            warnings.append("New SQL is identical to the current SQL; it was left out of the update.")
+        else:
+            payload["sql"] = sql
+        summary["sql"] = {
+            "current_sha256": current_sha,
+            "current_length": len(current_sql),
+            "new_sha256": _sha256(sql),
+            "new_length": len(sql),
+        }
+    if ctx.args.name:
+        payload["table_name"] = ctx.args.name
+    if ctx.args.description is not None:
+        payload["description"] = ctx.args.description
+    if ctx.args.cache_timeout is not None:
+        payload["cache_timeout"] = ctx.args.cache_timeout
+    if not payload:
+        raise UsageError("Nothing to update; pass at least one field that differs from the current value.")
+
+    calls = [{"method": "PUT", "path": f"/api/v1/dataset/{dataset_id}", "payload": payload}]
+    return _apply(ctx, "dataset.update", calls, warnings=warnings, summary=summary)
+
+
+def cmd_dataset_delete(ctx: Context) -> int:
+    return _apply(
+        ctx,
+        "dataset.delete",
+        [{"method": "DELETE", "path": f"/api/v1/dataset/{ctx.args.dataset_id}"}],
         destructive=True,
     )
 

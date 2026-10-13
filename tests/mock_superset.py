@@ -86,6 +86,11 @@ DATASETS = [
      "database": {"database_name": "examples"},
      "columns": [{"column_name": "x", "type": "VARCHAR", "is_dttm": False}],
      "metrics": [], "sql": None},
+    # A virtual (SQL) dataset on the allowlisted database, for dataset writes.
+    {"id": 9, "table_name": "stuck_orders_v", "schema": "public", "kind": "virtual",
+     "database": {"database_name": "acme_oms", "id": 1},
+     "columns": [{"column_name": "order_id", "type": "VARCHAR", "is_dttm": False}],
+     "metrics": [], "sql": "SELECT order_id FROM order_header WHERE status_id = 'APPROVED'"},
 ]
 
 def _q(qid, db, status, start_ms, seconds, user, rows=1, sql="SELECT 1"):

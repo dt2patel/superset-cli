@@ -108,8 +108,19 @@ tathya chart update <id> --name "..." [--params-file params.json]
 tathya dashboard create --title "..." [--slug ...] [--published]
 tathya dashboard update <id> --title "..." [--position-json-file layout.json]
 tathya dashboard add-chart <dashboard-id> <chart-id> [--width 4] [--height 50]
+tathya dataset update <id> --sql-file new.sql --expect-sql-sha256 <hash-of-sql-you-read>
+tathya dataset create --database-id <id> --name "..." --sql-file query.sql
 tathya export dashboard <id> --out asset.zip
 ```
+
+Dataset SQL runs on the client replica every time a chart renders, and
+Superset's request timeout does not stop the database query. `dataset update`
+and `dataset create` therefore run the SQL through the same read-only guard as
+`sql run`, and the dry run reports the current and new SQL hashes. Before
+saving, time the SQL wrapped the way a chart wraps it, under a database-side cap:
+`SELECT /*+ MAX_EXECUTION_TIME(30000) */ ... FROM (<dataset sql>) AS virtual_table`.
+Pass `--expect-sql-sha256` with the hash of the SQL you read so a concurrent UI
+edit is never overwritten.
 
 Deleting also requires `safety.allow_delete = true` in config. If a delete is
 blocked, report it rather than editing the config.

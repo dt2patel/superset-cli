@@ -105,6 +105,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds_get.add_argument("--raw", action="store_true", help="include the full API payload")
     p_ds_get.set_defaults(func=read.cmd_dataset_get)
 
+    p_ds_create = p_ds.add_parser("create", help="create a virtual (SQL) dataset")
+    p_ds_create.add_argument("--database-id", type=int, required=True)
+    p_ds_create.add_argument("--name", required=True)
+    p_ds_create.add_argument("--sql-file", required=True, help="file holding the dataset SQL")
+    p_ds_create.add_argument("--schema")
+    _add_confirm(p_ds_create)
+    p_ds_create.set_defaults(func=writecmd.cmd_dataset_create)
+
+    p_ds_update = p_ds.add_parser("update", help="update a dataset's SQL, name, description or cache timeout")
+    p_ds_update.add_argument("dataset_id", type=int)
+    p_ds_update.add_argument("--sql-file", help="file holding the new dataset SQL")
+    p_ds_update.add_argument(
+        "--expect-sql-sha256",
+        help="refuse unless the current SQL hashes to this (prefix ok), so a concurrent edit is never overwritten",
+    )
+    p_ds_update.add_argument("--name")
+    p_ds_update.add_argument("--description")
+    p_ds_update.add_argument("--cache-timeout", type=int)
+    _add_confirm(p_ds_update)
+    p_ds_update.set_defaults(func=writecmd.cmd_dataset_update)
+
+    p_ds_delete = p_ds.add_parser("delete", help="delete a dataset (needs safety.allow_delete)")
+    p_ds_delete.add_argument("dataset_id", type=int)
+    _add_confirm(p_ds_delete)
+    p_ds_delete.set_defaults(func=writecmd.cmd_dataset_delete)
+
     p_chart = sub.add_parser("chart", help="charts").add_subparsers(dest="sub", metavar="<action>")
     p_chart_list = p_chart.add_parser("list", help="list charts")
     _add_listing_args(p_chart_list)

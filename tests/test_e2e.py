@@ -454,3 +454,80 @@ def test_ops_watch_rejects_a_rowcount_condition(env, cli):
     code, payload = cli("watch", "list")
     assert code == EXIT_CONFIG
     assert "threshold, change, or delta_pct" in payload["error"]["message"]
+
+
+# ------------------------------------------------------------- dataset writes
+VIRTUAL_SQL = "SELECT order_id FROM order_header WHERE status_id = 'APPROVED'"
+
+
+def _sql_file(tmp_path, sql):
+    path = tmp_path / "dataset.sql"
+    path.write_text(sql)
+    return str(path)
+
+
+def test_dataset_update_dry_run_shows_hashes(env, cli, tmp_path):
+    new_sql = "SELECT order_id FROM order_header WHERE status_id = 'CREATED'"
+    code, payload = cli("dataset", "update", "9", "--sql-file", _sql_file(tmp_path, new_sql))
+    assert code == EXIT_OK
+    data = payload["data"]
+    assert data["dry_run"] is True
+    assert data["summary"]["sql"]["new_length"] == len(new_sql)
+    assert data["planned_calls"][0]["payload"]["sql"] == new_sql
+    assert not env.received
+
+
+def test_dataset_update_applies_with_both_switches(env, cli, tmp_path, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    new_sql = "SELECT order_id FROM order_header WHERE status_id = 'CREATED'"
+    code, payload = cli("dataset", "update", "9", "--sql-file", _sql_file(tmp_path, new_sql), "--confirm")
+    assert code == EXIT_OK
+    puts = [r for r in env.received if r["method"] == "PUT"]
+    assert puts == [{"method": "PUT", "path": "/api/v1/dataset/9", "body": {"sql": new_sql}}]
+
+
+def test_dataset_update_refuses_write_sql(env, cli, tmp_path, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, payload = cli(
+        "dataset", "update", "9", "--sql-file", _sql_file(tmp_path, "DELETE FROM order_header"), "--confirm"
+    )
+    assert code != EXIT_OK
+    assert "guard" in payload["error"]["message"]
+    assert not env.received
+
+
+def test_dataset_update_refuses_stale_expected_hash(env, cli, tmp_path, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, payload = cli(
+        "dataset", "update", "9", "--sql-file", _sql_file(tmp_path, "SELECT 1"),
+        "--expect-sql-sha256", "deadbeef", "--confirm",
+    )
+    assert code != EXIT_OK
+    assert "changed since it was read" in payload["error"]["message"]
+    assert not env.received
+
+
+def test_dataset_update_accepts_matching_expected_hash(env, cli, tmp_path, monkeypatch):
+    import hashlib
+
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    current = hashlib.sha256(VIRTUAL_SQL.encode()).hexdigest()[:16]
+    code, _ = cli(
+        "dataset", "update", "9", "--sql-file", _sql_file(tmp_path, "SELECT 1 AS x"),
+        "--expect-sql-sha256", current, "--confirm",
+    )
+    assert code == EXIT_OK
+    assert [r["path"] for r in env.received if r["method"] == "PUT"] == ["/api/v1/dataset/9"]
+
+
+def test_dataset_update_refuses_sql_on_physical_dataset(env, cli, tmp_path):
+    code, payload = cli("dataset", "update", "7", "--sql-file", _sql_file(tmp_path, "SELECT 1"))
+    assert code != EXIT_OK
+    assert "not a virtual" in payload["error"]["message"]
+
+
+def test_dataset_delete_blocked_without_allow_delete(env, cli, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, payload = cli("dataset", "delete", "9", "--confirm")
+    assert code == EXIT_WRITE_BLOCKED
+    assert not env.received
