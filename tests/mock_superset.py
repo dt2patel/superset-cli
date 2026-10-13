@@ -91,6 +91,11 @@ DATASETS = [
      "database": {"database_name": "acme_oms", "id": 1},
      "columns": [{"column_name": "order_id", "type": "VARCHAR", "is_dttm": False}],
      "metrics": [], "sql": "SELECT order_id FROM order_header WHERE status_id = 'APPROVED'"},
+    # A virtual dataset on `examples`, which tests do NOT allowlist.
+    {"id": 10, "table_name": "other_v", "schema": "public", "kind": "virtual",
+     "database": {"database_name": "examples", "id": 2},
+     "columns": [{"column_name": "x", "type": "VARCHAR", "is_dttm": False}],
+     "metrics": [], "sql": "SELECT x FROM other_table"},
 ]
 
 def _q(qid, db, status, start_ms, seconds, user, rows=1, sql="SELECT 1"):
@@ -299,6 +304,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(201, {"id": 99, "result": body})
         if path == "/api/v1/dashboard/":
             return self._send(201, {"id": 98, "result": body})
+        if path == "/api/v1/dataset/":
+            return self._send(201, {"id": 97, "result": body})
         return self._send(404, {"message": f"no mock route for POST {path}"})
 
     # ------------------------------------------------------------------- PUT

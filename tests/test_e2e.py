@@ -491,8 +491,7 @@ def test_dataset_update_refuses_write_sql(env, cli, tmp_path, monkeypatch):
     code, payload = cli(
         "dataset", "update", "9", "--sql-file", _sql_file(tmp_path, "DELETE FROM order_header"), "--confirm"
     )
-    assert code != EXIT_OK
-    assert "guard" in payload["error"]["message"]
+    assert code == EXIT_GUARD
     assert not env.received
 
 
@@ -531,3 +530,80 @@ def test_dataset_delete_blocked_without_allow_delete(env, cli, monkeypatch):
     code, payload = cli("dataset", "delete", "9", "--confirm")
     assert code == EXIT_WRITE_BLOCKED
     assert not env.received
+
+
+def test_dataset_update_refuses_unallowlisted_database(env, cli, tmp_path, monkeypatch):
+    """Dataset 10 is virtual but lives on `examples`, which the tests do not allowlist."""
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, _ = cli("dataset", "update", "10", "--sql-file", _sql_file(tmp_path, "SELECT 1"), "--confirm")
+    assert code == EXIT_CONFIG
+    assert not env.received
+
+
+def test_dataset_update_column_sync_is_opt_in(env, cli, tmp_path, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    sql_file = _sql_file(tmp_path, "SELECT order_id, status_id FROM order_header")
+    code, _ = cli("dataset", "update", "9", "--sql-file", sql_file, "--sync-columns", "--confirm")
+    assert code == EXIT_OK
+    assert [r["path"] for r in env.received if r["method"] == "PUT"] == [
+        "/api/v1/dataset/9",
+        "/api/v1/dataset/9/refresh",
+    ]
+
+
+# ------------------------------------------------------------- dataset create
+def test_dataset_create_guards_the_sql(env, cli, monkeypatch):
+    """A dataset's SQL is run by every chart on it, so it goes through the guard."""
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, payload = cli(
+        "dataset", "create", "acme_oms", "DELETE FROM orders", "--name", "Bad", "--confirm"
+    )
+    assert code == EXIT_GUARD
+    assert not env.received
+
+
+def test_dataset_create_refuses_unallowlisted_database(env, cli, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, _ = cli(
+        "dataset", "create", "examples", "SELECT 1", "--name", "Nope", "--confirm"
+    )
+    assert code == EXIT_CONFIG
+    assert not env.received
+
+
+def test_dataset_create_stores_sql_unlimited(env, cli, monkeypatch):
+    """No LIMIT may be baked in: Superset applies its own per-chart row caps and
+    a dataset-level LIMIT would silently truncate every chart downstream."""
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, payload = cli(
+        "dataset", "create", "acme_oms", "SELECT a, b FROM orders", "--name", "Velocity", "--confirm"
+    )
+    assert code == EXIT_OK
+    assert payload["data"]["id"] == 97
+    posts = [r for r in env.received if r["method"] == "POST" and r["path"] == "/api/v1/dataset/"]
+    assert len(posts) == 1
+    assert posts[0]["body"]["table_name"] == "Velocity"
+    assert "LIMIT" not in posts[0]["body"]["sql"].upper()
+    # ...and the column sync is chained off the returned id.
+    puts = [r for r in env.received if r["method"] == "PUT"]
+    assert puts[-1]["path"] == "/api/v1/dataset/97/refresh"
+
+
+def test_dataset_create_reads_sql_from_a_file(env, cli, tmp_path, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, _ = cli(
+        "dataset", "create", "acme_oms", "--file", _sql_file(tmp_path, "SELECT 1 AS x"),
+        "--name", "FromFile", "--no-sync", "--confirm",
+    )
+    assert code == EXIT_OK
+    posts = [r for r in env.received if r["method"] == "POST" and r["path"] == "/api/v1/dataset/"]
+    assert posts[0]["body"]["sql"] == "SELECT 1 AS x"
+
+
+def test_dataset_create_can_skip_the_column_sync(env, cli, monkeypatch):
+    monkeypatch.setenv("TATHYA_ALLOW_WRITE", "1")
+    code, _ = cli(
+        "dataset", "create", "acme_oms", "SELECT 1", "--name", "NoSync", "--no-sync", "--confirm"
+    )
+    assert code == EXIT_OK
+    assert not [r for r in env.received if r["method"] == "PUT"]

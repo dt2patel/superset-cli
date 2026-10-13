@@ -109,7 +109,7 @@ tathya dashboard create --title "..." [--slug ...] [--published]
 tathya dashboard update <id> --title "..." [--position-json-file layout.json]
 tathya dashboard add-chart <dashboard-id> <chart-id> [--width 4] [--height 50]
 tathya dataset update <id> --sql-file new.sql --expect-sql-sha256 <hash-of-sql-you-read>
-tathya dataset create --database-id <id> --name "..." --sql-file query.sql
+tathya dataset create <database> --sql-file query.sql --name "..." [--no-sync]
 tathya export dashboard <id> --out asset.zip
 ```
 
@@ -121,6 +121,11 @@ saving, time the SQL wrapped the way a chart wraps it, under a database-side cap
 `SELECT /*+ MAX_EXECUTION_TIME(30000) */ ... FROM (<dataset sql>) AS virtual_table`.
 Pass `--expect-sql-sha256` with the hash of the SQL you read so a concurrent UI
 edit is never overwritten.
+Both refuse databases that are not allowlisted, and a guard refusal exits 5.
+`dataset create` refreshes the new dataset's columns, and `dataset update
+--sync-columns` does the same after a SQL change; the refresh runs the dataset
+SQL on the client database with no database-side time limit, so only use it on
+SQL already timed under the cap.
 
 Deleting also requires `safety.allow_delete = true` in config. If a delete is
 blocked, report it rather than editing the config.

@@ -105,11 +105,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds_get.add_argument("--raw", action="store_true", help="include the full API payload")
     p_ds_get.set_defaults(func=read.cmd_dataset_get)
 
-    p_ds_create = p_ds.add_parser("create", help="create a virtual (SQL) dataset")
-    p_ds_create.add_argument("--database-id", type=int, required=True)
-    p_ds_create.add_argument("--name", required=True)
-    p_ds_create.add_argument("--sql-file", required=True, help="file holding the dataset SQL")
-    p_ds_create.add_argument("--schema")
+    p_ds_create = p_ds.add_parser(
+        "create", help="create a virtual (SQL-backed) dataset on an allowlisted database"
+    )
+    p_ds_create.add_argument("database", help="allowlisted database name or id")
+    p_ds_create.add_argument("sql", nargs="?", help="the dataset SELECT")
+    p_ds_create.add_argument("--sql-file", "--file", dest="sql_file", help="read the dataset SQL from a file instead")
+    p_ds_create.add_argument("--name", required=True, help="dataset (table) name shown in Superset")
+    p_ds_create.add_argument("--schema", help="schema to bind the dataset to")
+    p_ds_create.add_argument("--dialect", help="sqlglot dialect for parsing, e.g. mysql")
+    p_ds_create.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="skip the column refresh after creation (columns then resolve lazily)",
+    )
     _add_confirm(p_ds_create)
     p_ds_create.set_defaults(func=writecmd.cmd_dataset_create)
 
@@ -123,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds_update.add_argument("--name")
     p_ds_update.add_argument("--description")
     p_ds_update.add_argument("--cache-timeout", type=int)
+    p_ds_update.add_argument("--dialect", help="sqlglot dialect for parsing, e.g. mysql")
+    p_ds_update.add_argument(
+        "--sync-columns",
+        action="store_true",
+        help="refresh columns after a SQL change; runs the dataset SQL on the database once",
+    )
     _add_confirm(p_ds_update)
     p_ds_update.set_defaults(func=writecmd.cmd_dataset_update)
 

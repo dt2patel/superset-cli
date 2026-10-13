@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from tathya import guard
-from tathya.config import BACKEND_TO_DIALECT
 from tathya.context import Context
-from tathya.errors import ConfigError, UsageError
+from tathya.errors import GuardError, UsageError
 from tathya.output import render_table
+from tathya.query import resolve_database_id
 
 GRID_ID = "GRID_ID"
 ROOT_ID = "ROOT_ID"
@@ -60,7 +60,19 @@ def _apply(
     ctx.check_write(action, destructive=destructive)
 
     completed: list[dict] = []
+    created_ids: list[int] = []
+    prev_id: int | None = None
     for index, call in enumerate(calls):
+        # A call may reference the id created by the call before it, so that
+        # "create then sync" is one audited unit instead of two commands.
+        path = call["path"]
+        if "{prev_id}" in path:
+            if prev_id is None:
+                raise UsageError(
+                    f"Call {index} references {{prev_id}} but the previous call returned no id."
+                )
+            path = path.replace("{prev_id}", str(prev_id))
+        call = {**call, "path": path}
         try:
             response = ctx.client.request(
                 call["method"], call["path"], json_body=call.get("payload")
@@ -85,6 +97,10 @@ def _apply(
                 }
             raise
         completed.append(call)
+        new_id = (response or {}).get("id") if isinstance(response, dict) else None
+        if isinstance(new_id, int):
+            created_ids.append(new_id)
+            prev_id = new_id
         ctx.audit.record(
             command=action,
             step=index,
@@ -93,15 +109,17 @@ def _apply(
             payload=call.get("payload"),
             outcome="success",
         )
-    return ctx.emitter.ok(
-        action,
-        {
-            "applied": True,
-            **extra,
-            "calls": [{"method": c["method"], "path": c["path"]} for c in completed],
-        },
-        warnings=list(warnings or []),
-    )
+    result: dict[str, Any] = {
+        "applied": True,
+        **extra,
+        "calls": [{"method": c["method"], "path": c["path"]} for c in completed],
+    }
+    if created_ids:
+        # Callers script against this: without it the new id has to be scraped
+        # back out of a list call.
+        result["id"] = created_ids[0]
+        result["created_ids"] = created_ids
+    return ctx.emitter.ok(action, result, warnings=list(warnings or []))
 
 
 # ----------------------------------------------------------------------- charts
@@ -157,61 +175,60 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _read_sql_file(value: str) -> str:
-    path = Path(value).expanduser()
-    if not path.exists():
-        raise UsageError(f"--sql-file not found: {path}")
-    sql = path.read_text()
-    if not sql.strip():
-        raise UsageError(f"--sql-file is empty: {path}")
+def _read_sql(ctx: Context) -> str:
+    sql = getattr(ctx.args, "sql", None)
+    if ctx.args.sql_file:
+        path = Path(ctx.args.sql_file).expanduser()
+        if not path.exists():
+            raise UsageError(f"--sql-file not found: {path}")
+        sql = path.read_text()
+    if not sql or not sql.strip():
+        raise UsageError("Provide the dataset SQL positionally or with --sql-file.")
     return sql
-
-
-def _dialect_for(ctx: Context, database: dict) -> str | None:
-    """sqlglot dialect for a dataset's database: the allowlist entry, else the backend."""
-    try:
-        rule = ctx.config.database_rule(database.get("database_name") or database.get("id"))
-        if rule.dialect:
-            return rule.dialect
-    except ConfigError:
-        pass
-    return BACKEND_TO_DIALECT.get((database.get("backend") or "").lower())
 
 
 def _guard_dataset_sql(ctx: Context, sql: str, dialect: str | None) -> list[str]:
     """Refuse dataset SQL the read-only guard would refuse in `sql run`.
 
-    A virtual dataset's SQL runs against the client database every time a chart
-    on it renders, so it gets the same read-only check as an ad-hoc query. The
-    guard's LIMIT rewrite is not saved: charts apply their own row limits.
+    A dataset's query is executed over and over by every chart built on it - the
+    widest blast radius of any SQL in this tool - so it gets the same check as an
+    ad-hoc query. The guard is used for its verdict only: the SQL is stored
+    **unlimited**, since Superset applies its own per-chart row caps and a LIMIT
+    baked into a dataset would silently truncate every chart downstream.
     """
     verdict = guard.analyze(
         sql,
+        # Deliberately generous: we want the read-only verdict, not a row cap.
         max_rows=ctx.config.safety.hard_max_rows,
         dialect=dialect,
         denied_functions=ctx.config.safety.denied_functions,
     )
     if not verdict.ok:
-        raise UsageError(
-            f"Dataset SQL refused by the SQL guard: {verdict.reason}",
-            rule=verdict.rule,
-            hint="Dataset SQL must be a single read-only SELECT/WITH statement.",
-        )
+        raise GuardError(verdict.reason or "Dataset SQL refused by the guard.", rule=verdict.rule)
     return list(verdict.warnings)
 
 
 def cmd_dataset_create(ctx: Context) -> int:
-    database = (ctx.client.get(f"/api/v1/database/{ctx.args.database_id}") or {}).get("result") or {}
-    sql = _read_sql_file(ctx.args.sql_file)
-    warnings = _guard_dataset_sql(ctx, sql, _dialect_for(ctx, database))
+    """Create a virtual (SQL-backed) dataset on an allowlisted database."""
+    sql = _read_sql(ctx)
+    rule = ctx.config.database_rule(ctx.args.database)
+    warnings = _guard_dataset_sql(ctx, sql, ctx.args.dialect or rule.dialect)
+
     payload: dict[str, Any] = {
-        "database": ctx.args.database_id,
+        "database": resolve_database_id(ctx, rule),
         "table_name": ctx.args.name,
-        "sql": sql,
+        "sql": sql.strip(),
     }
-    if ctx.args.schema:
-        payload["schema"] = ctx.args.schema
+    schema = ctx.args.schema or rule.default_schema
+    if schema:
+        payload["schema"] = schema
+
     calls = [{"method": "POST", "path": "/api/v1/dataset/", "payload": payload}]
+    if not ctx.args.no_sync:
+        # Superset infers columns lazily; without this the dataset can land with
+        # no columns and every chart built on it comes back empty. The refresh
+        # runs the SQL on the database once.
+        calls.append({"method": "PUT", "path": "/api/v1/dataset/{prev_id}/refresh", "payload": None})
     return _apply(ctx, "dataset.create", calls, warnings=warnings)
 
 
@@ -241,8 +258,12 @@ def cmd_dataset_update(ctx: Context) -> int:
                 current_sql_sha256=current_sha,
                 expected=ctx.args.expect_sql_sha256,
             )
-        sql = _read_sql_file(ctx.args.sql_file)
-        warnings += _guard_dataset_sql(ctx, sql, _dialect_for(ctx, current.get("database") or {}))
+        database = current.get("database") or {}
+        # Same rule as `sql run` and `dataset create`: agents only put SQL on
+        # allowlisted databases.
+        rule = ctx.config.database_rule(database.get("database_name") or database.get("id"))
+        sql = _read_sql(ctx)
+        warnings += _guard_dataset_sql(ctx, sql, ctx.args.dialect or rule.dialect)
         if sql == current_sql:
             warnings.append("New SQL is identical to the current SQL; it was left out of the update.")
         else:
@@ -263,6 +284,10 @@ def cmd_dataset_update(ctx: Context) -> int:
         raise UsageError("Nothing to update; pass at least one field that differs from the current value.")
 
     calls = [{"method": "PUT", "path": f"/api/v1/dataset/{dataset_id}", "payload": payload}]
+    if ctx.args.sync_columns:
+        # Off by default: the refresh executes the dataset SQL on the client
+        # database with no database-side time limit.
+        calls.append({"method": "PUT", "path": f"/api/v1/dataset/{dataset_id}/refresh", "payload": None})
     return _apply(ctx, "dataset.update", calls, warnings=warnings, summary=summary)
 
 
