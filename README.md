@@ -333,6 +333,45 @@ notify:
   targets: [local, gchat]
 ```
 
+## Windowed watches: only what changed since the last run
+
+For "did anything go wrong since we last looked", add `source.window`. Each run
+checks the span from where the previous successful run ended up to `now - lag`,
+so consecutive runs cover time with no gap and no overlap:
+
+```yaml
+name: sync-gaps
+source:
+  type: sql
+  database: "Acme OMS"
+  sql_file: sync-gaps.sql      # beside this file; or put the SQL inline with `sql:`
+  window:
+    lag: 20m                   # leave in-flight work alone
+    initial: 30m               # how far the first run looks back
+    max: 24h                   # cap on catch-up after a long sleep (reported as truncated)
+condition:
+  type: rowcount
+  op: ">"
+  value: 0
+notify:
+  targets: [local]
+  mode: each_alert             # every run that finds rows reports; a clean window stays quiet
+  breakdown_column: finding    # summary reads "12 row(s) ...: 9 MISSING, 3 LATE"
+  handoff_dir: ~/Tathya/inbox  # each alert also drops one JSON file with its rows here
+```
+
+The SQL must use `{{window_start_utc}}` and `{{window_end_utc}}`. They become
+`'YYYY-MM-DD HH:MM:SS'` UTC literals; convert them to the database's time zone
+in SQL if it stores local time.
+
+- **Window state:** the window advances only after a successful check. A failed
+  run is retried next time.
+- **Deferred runs:** a run that cannot get a query slot or budget (exit 6) is
+  recorded as `deferred`. It sends no notification and leaves the window
+  untouched, so the next run covers it.
+- **Handoff files:** each one is written beside the folder and renamed in, so a
+  folder automation never sees a partial file.
+
 ---
 
 # Using this with AI agents

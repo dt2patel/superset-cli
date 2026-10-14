@@ -607,3 +607,48 @@ def test_dataset_create_can_skip_the_column_sync(env, cli, monkeypatch):
     )
     assert code == EXIT_OK
     assert not [r for r in env.received if r["method"] == "PUT"]
+
+
+WINDOWED_WATCH = """
+name: sync-gaps
+source:
+  type: sql
+  database: acme_oms
+  sql_file: gaps.sql
+  window: {{lag: 20m, initial: 30m, max: 24h}}
+condition: {{type: rowcount, op: ">", value: 0}}
+notify:
+  targets: [local]
+  mode: each_alert
+  handoff_dir: {inbox}
+"""
+
+
+def test_windowed_watch_tiles_time_reports_each_run_and_hands_off(env, cli, tmp_path):
+    import json
+
+    inbox = tmp_path / "inbox"
+    (env.watches / "gaps.sql").write_text(
+        "SELECT order_id FROM order_header "
+        "WHERE created >= '{{window_start_utc}}' AND created < '{{window_end_utc}}'"
+    )
+    (env.watches / "gaps.yaml").write_text(WINDOWED_WATCH.format(inbox=inbox))
+
+    code, payload = cli("watch", "run", "sync-gaps")
+    first = payload["data"]["results"][0]
+    assert code == EXIT_ALERT and first["notified"] is True
+    window = first["detail"]["window"]
+    sent = [r["body"]["sql"] for r in env.received if r["path"] == "/api/v1/sqllab/execute/"]
+    assert window["start_utc"] in sent[-1] and window["end_utc"] in sent[-1]
+    assert "{{" not in sent[-1]
+    handoff = json.loads(open(first["handoff_file"]).read())
+    assert handoff["rows_total"] == first["rows"] and handoff["detail"]["window"] == window
+
+    # The state advanced to this window's end; a second run starts there and reports again.
+    state = cli("watch", "state")[1]["data"]["sync-gaps"]
+    assert state["window_end"] == window["end"]
+    code2, payload2 = cli("watch", "run", "sync-gaps")
+    second = payload2["data"]["results"][0]
+    assert second["detail"]["window"]["start"] == window["end"]
+    assert second["notified"] is True and second["notify_reason"] == "each_alert"
+    assert len(list(inbox.glob("*-sync-gaps.json"))) == 2

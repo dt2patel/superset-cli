@@ -87,7 +87,7 @@ def cmd_watch_run(ctx: Context) -> int:
             )
         )
 
-    alerting = [r for r in results if r["status"] != watch_mod.STATUS_OK]
+    alerting = [r for r in results if r["status"] not in (watch_mod.STATUS_OK, watch_mod.STATUS_DEFERRED)]
 
     def human(data, line):
         render_table(
