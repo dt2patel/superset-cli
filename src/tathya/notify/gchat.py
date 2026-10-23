@@ -8,6 +8,8 @@ is redacted out of every log line.
 
 from __future__ import annotations
 
+from urllib.parse import parse_qsl
+
 import httpx
 
 from tathya.config import Config
@@ -20,6 +22,15 @@ STATUS_ICON = {
     "ok": "\U0001F7E2",         # green circle
     "recovered": "\U0001F7E2",
 }
+
+
+def _post(url: str, extra_params: dict, payload: dict) -> httpx.Response:
+    # httpx replaces a URL's query string when ``params`` is passed (even an empty
+    # dict), which would drop the webhook's own ``key`` and ``token``. Merge them.
+    base, _, query = url.partition("?")
+    params = dict(parse_qsl(query, keep_blank_values=True))
+    params.update(extra_params)
+    return httpx.post(base, params=params, json=payload, timeout=20.0)
 
 
 def webhook_url() -> str:
@@ -83,7 +94,7 @@ def send(event: dict, config: Config, *, dry_run: bool = False) -> dict:
         params["threadKey"] = thread_key
         params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     try:
-        response = httpx.post(url, params=params, json={"text": text}, timeout=20.0)
+        response = _post(url, params, {"text": text})
     except httpx.HTTPError as exc:
         # A delivery failure must not mask the alert it was carrying.
         return {"target": "gchat", "delivered": False, "error": str(exc)}
@@ -114,7 +125,7 @@ def send_text(text: str, config: Config, *, dry_run: bool = False, thread_key: s
         params["threadKey"] = key
         params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     try:
-        response = httpx.post(url, params=params, json={"text": text}, timeout=20.0)
+        response = _post(url, params, {"text": text})
     except httpx.HTTPError as exc:
         return {"target": "gchat", "delivered": False, "error": str(exc)}
     if response.status_code >= 400:
