@@ -25,7 +25,11 @@ def check(sql: str, **kwargs):
         ("GRANT ALL ON t TO u", "not_a_read"),
         ("SET statement_timeout = 0", "not_a_read"),
         ("COPY t TO '/tmp/x'", "not_a_read"),
-        ("EXPLAIN SELECT 1", "not_a_read"),
+        ("EXPLAIN DELETE FROM t", "not_a_read"),
+        ("EXPLAIN ANALYZE UPDATE t SET x = 1", "not_a_read"),
+        ("EXPLAIN SELECT 1; DROP TABLE t", "multiple_statements"),
+        ("EXPLAIN ANALYZE SELECT * FROM t FOR UPDATE", "row_locks"),
+        ("EXPLAIN ANALYZE SELECT pg_sleep(600)", "denied_function"),
         # Postgres data-modifying CTEs: the root really is a SELECT.
         ("WITH d AS (DELETE FROM t RETURNING id) SELECT * FROM d", "forbidden_node"),
         ("WITH u AS (UPDATE t SET x=1 RETURNING id) SELECT * FROM u", "forbidden_node"),
@@ -146,3 +150,25 @@ def test_literal_values_are_fine():
 def test_guard_still_blocks_writes_under_mysql_dialect():
     for sql in ("DROP TABLE `t`", "DELETE FROM `t`", "SELECT * FROM `t` FOR UPDATE"):
         assert not analyze(sql, max_rows=100, dialect="mysql").ok
+
+
+@pytest.mark.parametrize(
+    "sql,prefix",
+    [
+        ("EXPLAIN SELECT id FROM t WHERE id = 1", "EXPLAIN SELECT"),
+        ("explain format=tree SELECT id FROM t WHERE id = 1", "EXPLAIN FORMAT=TREE SELECT"),
+        ("EXPLAIN ANALYZE SELECT id FROM t WHERE id = 1", "EXPLAIN ANALYZE SELECT"),
+        ("EXPLAIN ANALYZE FORMAT=TREE SELECT id FROM t WHERE id = 1", "EXPLAIN ANALYZE FORMAT=TREE SELECT"),
+    ],
+)
+def test_explain_of_a_read_is_allowed(sql, prefix):
+    verdict = check(sql)
+    assert verdict.ok
+    assert verdict.sql.startswith(prefix)
+    assert "LIMIT" in verdict.sql.upper()
+
+
+def test_explain_analyze_warns_that_it_executes():
+    verdict = check("EXPLAIN ANALYZE SELECT id FROM t WHERE id = 1")
+    assert verdict.ok
+    assert any("executes" in w for w in verdict.warnings)

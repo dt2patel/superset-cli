@@ -14,6 +14,10 @@ Enforced, in order:
   5. no ``FOR UPDATE`` / ``FOR SHARE`` - those take locks on the source database
   6. no denied functions (``pg_sleep``, ``benchmark``, ...)
   7. a row LIMIT is present, injected if absent and clamped if too large
+
+``EXPLAIN``, ``EXPLAIN FORMAT=...`` and ``EXPLAIN ANALYZE`` are accepted only as a
+prefix to a statement that passes every rule above; the prefix is re-attached to
+the checked SQL. ``EXPLAIN ANALYZE`` executes that statement to time it.
 """
 
 from __future__ import annotations
@@ -45,6 +49,11 @@ FORBIDDEN_NODES: dict[type, str] = {
 }
 
 READ_ROOTS = (exp.Select, exp.Union, exp.Intersect, exp.Except, exp.Subquery)
+
+EXPLAIN_PREFIX = re.compile(
+    r"^\s*EXPLAIN(?P<analyze>\s+ANALYZE)?(?:\s+FORMAT\s*=\s*(?P<format>TREE|JSON|TRADITIONAL))?\s+(?P<body>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 def _selects_star(select: exp.Select) -> bool:
     """True for ``SELECT *`` / ``SELECT t.*`` but not ``SELECT COUNT(*)``."""
@@ -132,6 +141,32 @@ def analyze(
     text = (sql or "").strip()
     if not text:
         return _reject(original, "Empty statement.", "empty")
+
+    explain = EXPLAIN_PREFIX.match(text)
+    if explain:
+        inner = analyze(
+            explain.group("body"),
+            max_rows=max_rows,
+            dialect=dialect,
+            denied_functions=denied_functions,
+        )
+        if not inner.ok:
+            return _reject(original, inner.reason or "Explained statement was refused.", inner.rule or "explain_body")
+        is_analyze = bool(explain.group("analyze"))
+        prefix = "EXPLAIN" + (" ANALYZE" if is_analyze else "")
+        if explain.group("format"):
+            prefix += f" FORMAT={explain.group('format').upper()}"
+        warnings = list(inner.warnings)
+        if is_analyze:
+            warnings.insert(0, "EXPLAIN ANALYZE executes the statement on the replica to time it.")
+        return GuardVerdict(
+            ok=True,
+            original_sql=original,
+            sql=f"{prefix} {inner.sql}",
+            applied_limit=inner.applied_limit,
+            limit_source=inner.limit_source,
+            warnings=tuple(warnings),
+        )
 
     try:
         parsed = sqlglot.parse(text, read=dialect)
